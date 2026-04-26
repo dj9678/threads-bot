@@ -132,6 +132,25 @@ def _latest_recent_image() -> Path | None:
     )
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 자동 초안 페르소나 — claude --append-system-prompt 로 전달됨
+# (style-guide.md 의 포맷·길이·제약은 별도. 여기서는 "누가 쓰는가"만)
+# ──────────────────────────────────────────────────────────────────────
+DRAFT_PERSONA = """너는 10년 차 트레이더야. 글쓰기 좋아해서 본인 차트 분석
+노트를 스레드에 풀어 공유한 게 쌓여서 100만 팔로워 모았어. 공감과 신뢰로
+팬덤 쌓아왔지.
+
+글쓰기 원칙:
+- 반말, 친근하지만 가볍지 않게 (전문성 유지)
+- 1인칭 경험 ("오늘 BTC 보다가 눈에 띈 게 있어", "어제 숏 잡았는데 ...")
+- AI 티 나는 표현 금지: "~해야 합니다" 강의체, "결론적으로", 과도한 부사("매우/정말로/확실히")
+- 짧은 문장 위주, 한 호흡씩
+- 결론 또는 핵심 관찰 먼저 → 그 다음 근거
+- 차트에 명확히 보이는 사실만, 추측 시 "느낌상" / "감" 같은 표현 사용
+- 본인 포지션/생각 솔직하게 공유 OK ("나는 여기서 지켜보는 중")
+"""
+
+
 def _latest_recent_note() -> Path | None:
     return _latest_recent_file(NOTES_DIR, RECENT_NOTE_WINDOW_MIN, (".txt",))
 
@@ -183,20 +202,16 @@ async def _generate_draft(update: Update, img_path: Path, caption: str) -> None:
         f"스타일 가이드: {style_guide.resolve()}\n"
         f"ICT 용어집: {glossary.resolve()}\n"
         f"사용자 캡션: {caption or '(없음)'}\n\n"
-        "위 차트 이미지를 보고 style-guide.md 의 형식·톤·제약을 정확히 따르는 "
-        "Threads 포스트 본문을 작성하세요.\n\n"
-        "필수 규칙:\n"
-        "- 한국어, 500자 이하\n"
-        "- 관찰자 시점 (매매 권유 금지)\n"
-        "- 이미지에 명확하지 않은 수치/시간/종목명은 지어내지 말 것\n"
-        "- 이모지 최대 2개 (앞/뒤만)\n"
-        "- 해시태그 5개 이하\n\n"
-        "출력 형식: 본문만 ``` 로 감싸서 출력. 다른 설명/머리말 없이.\n"
+        "위 차트 이미지 + style-guide.md + ict-glossary.md 를 Read 도구로 읽고, "
+        "style-guide.md 의 모든 규칙 (길이·이모지·해시태그·금기 표현 등) 을 정확히 "
+        "따르는 Threads 포스트 본문을 작성해줘.\n\n"
+        "출력: 본문만 ``` 코드블록으로 감싸서. 다른 설명/머리말 없이.\n"
     )
 
     cmd = [
         "claude",
         "-p", prompt,
+        "--append-system-prompt", DRAFT_PERSONA,
         "--permission-mode", "default",
         "--max-turns", "5",
         "--add-dir", str(BASE_DIR.resolve()),
