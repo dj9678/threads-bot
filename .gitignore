@@ -1,0 +1,36 @@
+# ── 비밀 / 자격증명 ──────────────────────────────────────────────
+.env
+.auth/
+
+# ── 런타임 / 프로세스 ────────────────────────────────────────────
+bot.pid
+bot.log
+bot_error.log
+logs/
+
+# ── 사용자 콘텐츠 (개인 노트/이미지) ──────────────────────────────
+telegram-notes/
+screenshots/
+posted/
+
+# ── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ── IDE / OS ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── 로컬 Claude Code 가이드 (다른 레포 컨벤션 일관성) ─────────────
+CLAUDE.md
