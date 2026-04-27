@@ -72,7 +72,7 @@ if not ENV_PATH.exists():
         f"해당 위치에 BOT_TOKEN과 CHAT_ID를 포함한 .env 파일을 만들어주세요."
     )
 
-load_dotenv(ENV_PATH)
+load_dotenv(ENV_PATH, override=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID_RAW = os.getenv("CHAT_ID")
