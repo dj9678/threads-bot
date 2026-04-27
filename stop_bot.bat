@@ -10,40 +10,11 @@ setlocal enabledelayedexpansion
 set "PROJECT_ROOT=%~dp0"
 set "PID_FILE=%PROJECT_ROOT%bot.pid"
 
-if not exist "%PID_FILE%" (
-    echo [!] bot.pid not found. Bot may not be running.
-    echo     Checking for any pythonw.exe processes:
-    tasklist /FI "IMAGENAME eq pythonw.exe" 2>nul | find "pythonw.exe"
-    if errorlevel 1 (
-        echo     No pythonw.exe processes running.
-    ) else (
-        echo.
-        echo     The processes above may belong to other bots.
-        echo     Stop manually if needed: taskkill /PID [number] /F
-    )
-    exit /b 0
-)
+REM Selective kill: ExecutablePath OR CommandLine match (catches orphans too)
+echo [*] Stopping any threads-bot instance(s)...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='pythonw.exe' or name='python.exe'\" | Where-Object { ($_.ExecutablePath -like '%PROJECT_ROOT%.venv*') -or ($_.CommandLine -like '*%PROJECT_ROOT%scripts\telegram_listener.py*') -or ($_.CommandLine -like '*telegram_listener.py*') } | ForEach-Object { Write-Host ('  killed PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }"
 
-set /p PID=<"%PID_FILE%"
-
-REM Check if PID is alive
-tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul
-if errorlevel 1 (
-    echo [!] PID %PID% is already gone.
-    del "%PID_FILE%"
-    echo [+] Stale PID file cleaned up.
-    exit /b 0
-)
-
-REM Terminate
-echo [*] Stopping PID %PID%...
-taskkill /PID %PID% /F >nul 2>&1
-
-if errorlevel 1 (
-    echo [!] Stop failed. May require admin privileges.
-) else (
-    echo [+] Bot stopped successfully.
-    del "%PID_FILE%"
-)
+if exist "%PID_FILE%" del "%PID_FILE%" >nul 2>&1
+echo [+] Done.
 
 endlocal

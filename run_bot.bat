@@ -18,18 +18,11 @@ set "LOG_FILE=%PROJECT_ROOT%bot.log"
 set "ERR_FILE=%PROJECT_ROOT%bot_error.log"
 set "PID_FILE=%PROJECT_ROOT%bot.pid"
 
-REM Check if already running
-if exist "%PID_FILE%" (
-    set /p EXISTING_PID=<"%PID_FILE%"
-    tasklist /FI "PID eq !EXISTING_PID!" 2>nul | find "!EXISTING_PID!" >nul
-    if not errorlevel 1 (
-        echo [!] Bot is already running. PID: !EXISTING_PID!
-        echo     Run stop_bot.bat to stop it.
-        pause
-        exit /b 1
-    )
-    del "%PID_FILE%" >nul 2>&1
-)
+REM Defensive cleanup: ExecutablePath OR CommandLine (catches orphans too)
+echo [*] Cleaning up any existing instance(s)...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='pythonw.exe' or name='python.exe'\" | Where-Object { ($_.ExecutablePath -like '%PROJECT_ROOT%.venv*') -or ($_.CommandLine -like '*%PROJECT_ROOT%scripts\telegram_listener.py*') -or ($_.CommandLine -like '*telegram_listener.py*') } | ForEach-Object { Write-Host ('  killed PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }"
+if exist "%PID_FILE%" del "%PID_FILE%" >nul 2>&1
+timeout /t 2 /nobreak >nul
 
 REM Create .venv if missing
 if not exist "%VENV_DIR%\Scripts\python.exe" (
