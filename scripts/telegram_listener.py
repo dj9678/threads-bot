@@ -236,6 +236,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stripped.startswith("/cancel"):
         await handle_cancel(update, context)
         return
+    if stripped.startswith("/help") or stripped.startswith("/start"):
+        await handle_help(update, context)
+        return
 
     fname = NOTES_DIR / f"{timestamp()}.txt"
     fname.write_text(text, encoding="utf-8")
@@ -612,6 +615,33 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE, overri
                     )
 
 
+async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != CHAT_ID:
+        return
+    msg = (
+        "📖 명령어 목록\n\n"
+        "▪️ /whoami — 로그인된 IG 계정 확인\n"
+        "▪️ /mode — 모드 보기 (local / remote 전환)\n"
+        "\n"
+        "📝 게시 흐름\n"
+        "▪️ /post <본문> — 본문 게시 (`+++` 구분자로 멀티 포스트, `[IMG]` 마커로 이미지 위치)\n"
+        "▪️ /post_draft — 직전 자동 초안 그대로 게시\n"
+        "▪️ /edit — 직전 초안을 코드블록으로 받기 (복사·편집·재전송)\n"
+        "▪️ /confirm — (remote) 대기 게시 확정 [현재 비권장: Threads 감지]\n"
+        "▪️ /cancel — (remote) 대기 게시 취소\n"
+        "▪️ /posted — 직전 게시 소스 파일을 posted/ 로 이동\n"
+        "\n"
+        "💬 일반 입력\n"
+        "▪️ 텍스트 → telegram-notes/ 저장\n"
+        "▪️ 차트 이미지(+캡션) → screenshots/ 저장 + 자동 초안 생성\n"
+        "\n"
+        "💡 팁\n"
+        "• 차트 캡션에 방향 한 단어(상승/하락/중립) 적으면 정확도 ↑\n"
+        "• 자동 게시는 현재 비권장 — 봇은 초안 생성용, 게시는 직접"
+    )
+    await update.message.reply_text(msg)
+
+
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """직전 초안 본문을 `/post <본문>` 형태로 반환.
     사용자가 코드블록을 길게 눌러 복사 → 편집 → 전송하면 그대로 게시 흐름 진입.
@@ -853,6 +883,8 @@ def main():
     app.add_handler(CommandHandler("post", handle_post))
     app.add_handler(CommandHandler("post_draft", handle_post_draft))
     app.add_handler(CommandHandler("edit", handle_edit))
+    app.add_handler(CommandHandler("help", handle_help))
+    app.add_handler(CommandHandler("start", handle_help))
     app.add_handler(CommandHandler("confirm", handle_confirm))
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CommandHandler("posted", handle_posted))
