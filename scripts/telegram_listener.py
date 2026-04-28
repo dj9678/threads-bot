@@ -137,6 +137,29 @@ _state: dict = {"mode": "remote"}
 # 마지막 초안의 분석 방향 저장 (상승/하락/중립)
 _last_draft_direction: dict = {"value": ""}
 
+# 마지막 초안의 본문(코드블록 내용만) 저장 — /post_draft 에서 사용
+_last_draft_body: dict = {"value": ""}
+
+
+def _extract_draft_body(text: str) -> str:
+    """초안 응답에서 ``` 코드블록 안쪽 본문만 추출.
+
+    포맷:
+        [방향] 상승/하락/중립
+        [본문]
+        ```
+        실제 본문
+        ```
+    """
+    # ``` 로 둘러싸인 첫 블록 추출
+    m = re.search(r"```(?:\w+)?\s*\n?(.*?)\n?```", text, flags=re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # 코드블록 없으면 [본문] 이후 텍스트 통째로
+    if "[본문]" in text:
+        return text.split("[본문]", 1)[1].strip().strip("`").strip()
+    return text.strip()
+
 
 def _latest_recent_file(
     directory: Path, window_min: int, suffixes: tuple[str, ...]
@@ -194,6 +217,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != CHAT_ID:
         return  # 본인만 허용
     text = update.message.text or ""
+
+    # 코드블록 복붙으로 앞에 공백/줄바꿈이 묻어 명령어 인식 실패한 경우 폴백 라우팅
+    stripped = text.lstrip()
+    if stripped.startswith("/post_draft"):
+        await handle_post_draft(update, context)
+        return
+    if stripped.startswith("/post"):
+        body = re.sub(r"^/post(@\w+)?\s*", "", stripped, count=1).strip()
+        await handle_post(update, context, override_body=body)
+        return
+    if stripped.startswith("/edit"):
+        await handle_edit(update, context)
+        return
+    if stripped.startswith("/confirm"):
+        await handle_confirm(update, context)
+        return
+    if stripped.startswith("/cancel"):
+        await handle_cancel(update, context)
+        return
+
     fname = NOTES_DIR / f"{timestamp()}.txt"
     fname.write_text(text, encoding="utf-8")
     await update.message.reply_text(f"✅ 저장됨: {fname.name}")
@@ -261,12 +304,41 @@ style-guide.md의 "직전 게시글과 연결" 섹션 규칙을 따를 것.
         f"사용자 캡션: {caption or '(없음)'}\n"
         f"{prev_context}\n"
         f"{continuity_instruction}\n\n"
+        "**차트 시그널 해석 규칙 (매우 중요):**\n"
+        "- T 캔들 라벨의 화살표 방향에 절대 주의: ↑(위 화살표) = 상승/롱 시그널, ↓(아래 화살표) = 하락/숏 시그널.\n"
+        "  T2F↑/T3F↑/T2↑ 는 모두 롱(상승), T2F↓/T3F↓/T2↓/T4↓ 는 모두 숏(하락).\n"
+        "- 화살표 식별이 애매하면 추측하지 말 것. '양방향 시그널 공존', '방향 확정 짓기 애매함' 으로 처리.\n"
+        "- 캔들 색깔(녹/적)로 시그널 방향을 추론하지 말 것. 라벨 화살표가 진실의 원천.\n"
+        "- **사용자 캡션이 차트 해석과 다르면 캡션을 우선**. 캡션에 방향이 명시되면 그 방향으로 작성.\n\n"
         "위 차트 이미지 + style-guide.md + ict-glossary.md 를 Read 도구로 읽고, "
         "style-guide.md 의 모든 규칙 (길이·이모지·해시태그·금기 표현 등) 을 정확히 "
-        "따르는 Threads 포스트 본문을 작성해줘.\n\n"
-        "현재 차트에서 분석한 방향(상승/하락/중립)도 명시해줘. 포맷:\n"
+        "따르는 **멀티 포스트(스레드 체인)** 형식으로 작성해줘.\n\n"
+        "**멀티 포스트 구조 (style-guide.md '멀티 포스트 작성 패턴' 섹션 참고):**\n"
+        "- 1번 (본문/Hook): 짧게(200~300자). 호기심 유발 + 핵심 결론 한 줄.\n"
+        "  style-guide.md의 '훅 작성법' 섹션 패턴 따를 것.\n"
+        "- 2번 (이어쓰기 1): 본격 분석/설명 (300~500자). 차트 구조·시그널·근거.\n"
+        "  여기에 [IMG] 한 줄을 적당한 위치에 넣어 차트 이미지 첨부 위치 표시.\n"
+        "- 3번 (이어쓰기 2, 선택): 시나리오/관점 추가 (300~500자). 양방향 열어두기.\n"
+        "- 마지막 (마무리): 짧게(150~250자). 정리 + (필요시) 본인 포지션/관망 멘트.\n\n"
+        "포스트 사이는 반드시 한 줄에 `+++` 만 적은 구분자로 분리할 것.\n"
+        "총 3~4개 포스트 권장.\n\n"
+        "**중요 출력 규칙:**\n"
+        "- 분석 과정/관찰 노트/차트 설명 같은 사전 텍스트를 출력하지 마.\n"
+        "- '차트를 분석해볼게', '**차트 분석:**', '**핵심 관찰:**' 류 머리말 절대 금지.\n"
+        "- 마크다운 불릿(- ...)으로 차트 분석을 나열하지 마.\n"
+        "- 출력은 아래 블록 **하나만**:\n\n"
         "[방향] 상승 또는 하락 또는 중립\n"
-        "[본문]\n```\n실제 포스트 내용\n```\n"
+        "[본문]\n"
+        "```\n"
+        "1번 본문 (Hook)\n"
+        "+++\n"
+        "2번 이어쓰기 (설명 + [IMG])\n"
+        "+++\n"
+        "3번 이어쓰기 (선택)\n"
+        "+++\n"
+        "마지막 마무리\n"
+        "```\n\n"
+        "이 블록 외엔 어떤 텍스트도 출력하지 말 것."
     )
 
     cmd = [
@@ -306,6 +378,11 @@ style-guide.md의 "직전 게시글과 연결" 섹션 규칙을 따를 것.
         )
         return
 
+    # 응답 앞에 분석 과정/머리말이 붙어 나오면 [방향] 라인부터 잘라냄
+    direction_pos = text.find("[방향]")
+    if direction_pos > 0:
+        text = text[direction_pos:].strip()
+
     # 방향 파싱 ([방향] 상승/하락/중립)
     direction_match = re.search(r"\[방향\]\s*(상승|하락|중립)", text)
     if direction_match:
@@ -322,11 +399,16 @@ style-guide.md의 "직전 게시글과 연결" 섹션 규칙을 따를 것.
     # bridge 봇이 "이 초안 어때?" 분석할 때 참조
     _save_last_output(text, kind="draft")
 
+    # 본문만 추출해서 저장 (/post_draft 에서 사용)
+    extracted = _extract_draft_body(text)
+    _last_draft_body["value"] = extracted
+
     msg = (
         "✍️ 초안 (style-guide 적용):\n\n"
         f"{text}\n\n"
         f"📊 분석 방향: {_last_draft_direction['value']}\n\n"
-        "사용하려면 위 코드블록 본문을 복사해서 `/post <본문>` 으로 보내세요."
+        "👉 그대로 게시: /post_draft\n"
+        "✏️ 수정 후 게시: /edit (코드블록 복사 → 편집 → 전송)"
     )
     # 너무 길면 분할 송신
     MAX = 3500
@@ -337,13 +419,17 @@ style-guide.md의 "직전 게시글과 연결" 섹션 규칙을 따를 것.
             await update.message.reply_text(msg[i:i + MAX])
 
 
-async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE, override_body: "str | None" = None):
     if update.effective_chat.id != CHAT_ID:
         return
 
-    # 줄바꿈 보존을 위해 원본 메시지에서 /post 프리픽스만 제거
-    raw = update.message.text or ""
-    body = re.sub(r"^/post(@\w+)?\s*", "", raw, count=1).strip()
+    if override_body is not None:
+        body = override_body.strip()
+    else:
+        # 줄바꿈 보존을 위해 원본 메시지에서 /post 프리픽스만 제거
+        raw = update.message.text or ""
+        # 앞쪽 공백/줄바꿈 허용해서 /post 프리픽스 제거 (코드블록 복붙 대응)
+        body = re.sub(r"^\s*/post(@\w+)?\s*", "", raw, count=1).strip()
 
     if not body:
         notes = sorted(NOTES_DIR.glob("*.txt"))
@@ -354,10 +440,50 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "사용법:\n"
             "  /post 본문    ← 해당 본문을 Threads 작성창에 채움 (게시는 수동)\n"
             "\n"
+            "  멀티 포스트 (Add to thread):\n"
+            "    한 줄에 +++ 만 적어서 분리\n"
+            "    예) /post 본문\\n+++\\n이어글1\\n+++\\n이어글2\n"
+            "\n"
+            "  이미지 첨부 위치 지정:\n"
+            "    원하는 포스트 안에 [IMG] 한 줄 추가 (마커 줄은 제거됨)\n"
+            "    미지정 시 마지막 포스트에 첨부\n"
+            "\n"
             "[최신 저장 노트 프리뷰]\n"
             f"{preview}"
         )
         return
+
+    # +++ 단독 라인을 구분자로 분리 → 멀티 포스트
+    parts = re.split(r"^\s*\+\+\+\s*$", body, flags=re.MULTILINE)
+    posts = [p.strip() for p in parts if p.strip()]
+    if not posts:
+        await update.message.reply_text("본문이 비어있습니다.")
+        return
+
+    # [IMG] 마커가 있는 포스트 인덱스 찾고 마커 줄 제거
+    # 마커 없으면 image_index = -1 (= 마지막 포스트, threads_poster 측 기본값)
+    image_index = -1
+    cleaned_posts: list[str] = []
+    for idx, p in enumerate(posts):
+        # 줄 단위로 보고 [IMG] 만 있는 라인 제거
+        lines = p.split("\n")
+        has_marker = False
+        new_lines = []
+        for line in lines:
+            if re.fullmatch(r"\s*\[IMG\]\s*", line):
+                has_marker = True
+                continue
+            new_lines.append(line)
+        if has_marker and image_index == -1:
+            image_index = idx
+        cleaned_posts.append("\n".join(new_lines).strip())
+    posts = [p for p in cleaned_posts if p]
+    if not posts:
+        await update.message.reply_text("본문이 비어있습니다.")
+        return
+
+    # 단일 포스트면 str, 멀티면 list 로 전달
+    body_arg = posts[0] if len(posts) == 1 else posts
 
     mode = _state["mode"]
 
@@ -381,11 +507,17 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _last_post_sources["note"] = note_path
     _last_post_sources["image"] = image_path
 
-    image_note = (
-        f"🖼️ 이미지 첨부: {image_path.name}"
-        if image_path
-        else f"🖼️ 이미지 첨부: 없음"
-    )
+    if image_path:
+        if len(posts) > 1:
+            target_idx = image_index if image_index >= 0 else len(posts) - 1
+            target_label = (
+                f"본문(1번)" if target_idx == 0 else f"이어쓰기 {target_idx}번"
+            )
+            image_note = f"🖼️ 이미지 첨부: {image_path.name} → {target_label}"
+        else:
+            image_note = f"🖼️ 이미지 첨부: {image_path.name}"
+    else:
+        image_note = "🖼️ 이미지 첨부: 없음"
     note_info = (
         f"📝 연결 노트: {note_path.name}"
         if note_path
@@ -396,10 +528,17 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "remote"
         else "🖥️ local (headful + 창에서 직접 게시)"
     )
+    chain_info = (
+        f"🧵 멀티 포스트: 본문 + 이어쓰기 {len(posts) - 1}개"
+        if len(posts) > 1
+        else "📝 단일 포스트"
+    )
+    first_preview = posts[0]
     await update.message.reply_text(
         f"⏳ Threads 작성창 채우는 중... [{mode_banner}]\n\n"
-        f"본문 ({len(body)}자):\n{body[:200]}"
-        + ("..." if len(body) > 200 else "")
+        f"{chain_info}\n"
+        f"첫 포스트 ({len(first_preview)}자):\n{first_preview[:200]}"
+        + ("..." if len(first_preview) > 200 else "")
         + f"\n\n{image_note}\n{note_info}"
     )
 
@@ -416,10 +555,11 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg)
 
             await post_text(
-                body,
+                body_arg,
                 headless=False,
                 on_filled=_notify_filled,
                 image_path=image_path,
+                image_index=image_index,
             )
             return
 
@@ -427,7 +567,7 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from threads_poster import fill_for_approval  # lazy import
 
         preview_png = await fill_for_approval(
-            body, image_path=image_path, headless=True
+            body_arg, image_path=image_path, headless=True, image_index=image_index
         )
 
         caption = (
@@ -470,6 +610,63 @@ async def handle_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(
                         f"(디버그 스크린샷 전송 실패: {send_err})"
                     )
+
+
+async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """직전 초안 본문을 `/post <본문>` 형태로 반환.
+    사용자가 코드블록을 길게 눌러 복사 → 편집 → 전송하면 그대로 게시 흐름 진입.
+    """
+    if update.effective_chat.id != CHAT_ID:
+        return
+
+    body = _last_draft_body.get("value", "").strip()
+    if not body:
+        await update.message.reply_text(
+            "직전 초안이 없습니다.\n"
+            "차트 이미지를 먼저 보내서 초안을 생성하세요."
+        )
+        return
+
+    full_cmd = f"/post {body}"
+
+    # 텔레그램 메시지 길이 제한 (4096) 고려
+    MAX = 3800
+    intro = (
+        "✏️ 편집용 초안입니다.\n"
+        "아래 코드블록을 길게 눌러 복사 → 입력창에 붙여넣고 수정 → 전송하면 게시됩니다.\n"
+    )
+
+    if len(full_cmd) <= MAX:
+        # MarkdownV2 대신 간단하게: ``` 펜스로 감싸서 모노스페이스 + 복사 용이
+        msg = intro + f"\n```\n{full_cmd}\n```"
+        try:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        except Exception:
+            # 마크다운 이스케이프 충돌 시 평문 폴백
+            await update.message.reply_text(intro + "\n" + full_cmd)
+    else:
+        # 너무 길면 분할 송신 (편집 흐름엔 불리하지만 폴백)
+        await update.message.reply_text(
+            intro + "\n(본문이 너무 길어 분할 전송. 합쳐서 한 번에 /post 로 보내세요.)"
+        )
+        for i in range(0, len(full_cmd), MAX):
+            await update.message.reply_text(full_cmd[i:i + MAX])
+
+
+async def handle_post_draft(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """직전에 자동 생성된 초안 본문을 그대로 /post 흐름으로 보낸다."""
+    if update.effective_chat.id != CHAT_ID:
+        return
+
+    body = _last_draft_body.get("value", "").strip()
+    if not body:
+        await update.message.reply_text(
+            "직전 초안이 없습니다.\n"
+            "차트 이미지를 먼저 보내서 초안을 생성하세요."
+        )
+        return
+
+    await handle_post(update, context, override_body=body)
 
 
 async def handle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -654,6 +851,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("mode", handle_mode))
     app.add_handler(CommandHandler("post", handle_post))
+    app.add_handler(CommandHandler("post_draft", handle_post_draft))
+    app.add_handler(CommandHandler("edit", handle_edit))
     app.add_handler(CommandHandler("confirm", handle_confirm))
     app.add_handler(CommandHandler("cancel", handle_cancel))
     app.add_handler(CommandHandler("posted", handle_posted))

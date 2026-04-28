@@ -111,7 +111,7 @@ async def _open_composer(page: Page) -> None:
 
 
 async def _fill_text(page: Page, text: str) -> None:
-    """모달의 contenteditable 영역에 본문 입력."""
+    """모달의 contenteditable 영역에 본문 입력 (첫 포스트)."""
     # 모달이 뜰 시간
     await page.wait_for_timeout(1000)
 
@@ -122,8 +122,95 @@ async def _fill_text(page: Page, text: str) -> None:
     await composer.type(text, delay=10)
 
 
-async def _attach_image(page: Page, image_path: Path) -> None:
+async def _click_add_to_thread(page: Page) -> None:
+    """'Add to thread' / '스레드에 추가' 클릭 후 새 입력창 등장 대기."""
+    before_count = await page.locator('div[contenteditable="true"]').count()
+
+    name_pattern = re.compile(r"스레드에 추가|Add to thread", re.IGNORECASE)
+    attempts = [
+        ("role=button", lambda: page.get_by_role("button", name=name_pattern).first),
+        ("text", lambda: page.get_by_text(name_pattern).first),
+        ("aria-label-ko", lambda: page.locator('[aria-label="스레드에 추가"]').first),
+        ("aria-label-en", lambda: page.locator('[aria-label="Add to thread"]').first),
+    ]
+
+    tried: list[str] = []
+    for tag, fn in attempts:
+        try:
+            btn = fn()
+            await btn.wait_for(state="visible", timeout=2500)
+            await btn.click(timeout=2500)
+            print(f"[add_to_thread] success via: {tag}")
+            # 새 입력창 등장 대기
+            for _ in range(20):
+                await page.wait_for_timeout(150)
+                if await page.locator('div[contenteditable="true"]').count() > before_count:
+                    return
+            return
+        except Exception as e:
+            tried.append(f"{tag}: {type(e).__name__}")
+            continue
+
+    debug_png = await _save_debug(page, "add_to_thread_not_found")
+    raise RuntimeError(
+        "'스레드에 추가/Add to thread' 버튼을 찾지 못했습니다. 시도:\n  "
+        + "\n  ".join(tried)
+        + f"\n\n디버그 스크린샷: {debug_png}"
+    )
+
+
+async def _fill_chain(
+    page: Page,
+    posts: list[str],
+    image_path: "Path | None" = None,
+    image_index: int = -1,
+) -> None:
+    """본문 + 이어쓰기 시퀀스를 작성 모달에 채운다.
+
+    image_path가 있으면 image_index 위치 포스트에 첨부.
+    image_index < 0 또는 범위 밖이면 마지막 포스트.
+    이미지 첨부는 해당 포스트의 입력창이 활성화된 직후 수행.
+    """
+    if not posts:
+        raise ValueError("posts가 비어있음")
+
+    # 이미지 첨부 대상 포스트 인덱스 정규화
+    if image_path is not None:
+        if image_index < 0 or image_index >= len(posts):
+            image_index = len(posts) - 1
+    else:
+        image_index = -1  # 첨부 안함
+
+    # 첫 포스트
+    await _fill_text(page, posts[0])
+    if image_index == 0:
+        await _attach_image(page, image_path, input_index=image_index)
+    await page.wait_for_timeout(800)
+
+    # 이어쓰기 — Threads 서버측 상태 동기화 대기 시간 충분히 확보
+    for i, post in enumerate(posts[1:], start=1):
+        await _click_add_to_thread(page)
+        await page.wait_for_timeout(600)  # Add to thread 후 새 composer 안정화
+        composer = page.locator('div[contenteditable="true"]').nth(i)
+        await composer.wait_for(state="visible", timeout=5000)
+        await composer.click()
+        # 타이핑 속도를 좀 늦춰서 server-side 입력 추적 누락 방지
+        await composer.type(post, delay=18)
+        if i == image_index:
+            await page.wait_for_timeout(300)
+            await _attach_image(page, image_path, input_index=image_index)
+        # 다음 Add to thread 전 / 마지막 composer 후 충분히 대기
+        await page.wait_for_timeout(900)
+
+    # 게시 직전 추가 안정화 — 마지막 composer 텍스트가 서버에 반영될 시간
+    await page.wait_for_timeout(1500)
+
+
+async def _attach_image(page: Page, image_path: Path, input_index: int = -1) -> None:
     """작성 모달에 이미지 첨부.
+
+    input_index: 멀티 포스트에서 input[type=file] 중 몇 번째를 쓸지.
+                 -1이면 마지막(현재 활성 포스트로 추정).
 
     전략:
     1) DOM에 존재하는 input[type=file]에 직접 set_input_files
@@ -135,14 +222,14 @@ async def _attach_image(page: Page, image_path: Path) -> None:
 
     # 전략 1: 숨겨진 input[type=file] 직접 사용
     try:
-        file_input = page.locator('input[type="file"]').first
-        # 존재 여부 확인 (visible이 아니어도 OK — hidden input 많음)
         count = await page.locator('input[type="file"]').count()
         if count > 0:
+            idx = count - 1 if input_index < 0 or input_index >= count else input_index
+            file_input = page.locator('input[type="file"]').nth(idx)
             await file_input.set_input_files(str(image_path))
             # 업로드 프리뷰 렌더 대기
             await page.wait_for_timeout(1500)
-            print(f"[attach_image] success via hidden input[type=file]")
+            print(f"[attach_image] success via hidden input[type=file] (idx={idx}/{count})")
             return
     except Exception as e:
         print(f"[attach_image] hidden input 실패: {type(e).__name__}: {e}")
@@ -179,25 +266,56 @@ async def _attach_image(page: Page, image_path: Path) -> None:
 
 
 async def _click_publish(page: Page) -> None:
-    """작성 모달의 '게시' 버튼 클릭."""
+    """작성 모달 푸터의 '게시' 버튼만 클릭.
+
+    주의: 페이지 다른 곳에도 '게시' 텍스트가 있을 수 있으므로
+          반드시 dialog/modal 안의 버튼으로 좁힌다.
+    """
+    # 게시 직전 상태 진단: contenteditable 개수
+    try:
+        cnt = await page.locator('div[contenteditable="true"]').count()
+        print(f"[click_publish] composers in modal: {cnt}")
+    except Exception:
+        pass
+
     name_pattern = re.compile(r"^(게시|Post)$", re.IGNORECASE)
+
+    # 모달 컨테이너 후보 — Threads는 role=dialog 사용
+    dialog = page.locator('div[role="dialog"]').last
+
     attempts = [
-        lambda: page.get_by_role("button", name=name_pattern).first,
-        lambda: page.locator('div[role="button"]', has_text=re.compile(r"^(게시|Post)$")).first,
+        ("dialog>role=button", lambda: dialog.get_by_role("button", name=name_pattern).last),
+        ("dialog>div[role=button]", lambda: dialog.locator('div[role="button"]', has_text=re.compile(r"^(게시|Post)$")).last),
+        # 폴백: 페이지 전체에서 마지막 매칭 (.last로 모달 푸터 버튼 우선 시도)
+        ("page>role=button.last", lambda: page.get_by_role("button", name=name_pattern).last),
+        ("page>div[role=button].last", lambda: page.locator('div[role="button"]', has_text=re.compile(r"^(게시|Post)$")).last),
     ]
-    for attempt in attempts:
+
+    tried: list[str] = []
+    for tag, attempt in attempts:
         try:
             btn = attempt()
             await btn.wait_for(state="visible", timeout=3000)
+            # 버튼이 disabled 상태면 스킵
+            try:
+                disabled = await btn.get_attribute("aria-disabled")
+                if disabled == "true":
+                    tried.append(f"{tag}: aria-disabled=true")
+                    continue
+            except Exception:
+                pass
             await btn.click(timeout=3000)
-            print("[click_publish] success")
+            print(f"[click_publish] success via: {tag}")
             return
-        except Exception:
+        except Exception as e:
+            tried.append(f"{tag}: {type(e).__name__}: {str(e)[:80]}")
             continue
 
     debug_png = await _save_debug(page, "publish_btn_not_found")
     raise RuntimeError(
-        f"'게시' 버튼을 찾지 못했습니다. 디버그 스크린샷: {debug_png}"
+        "'게시' 버튼 클릭 실패. 시도:\n  "
+        + "\n  ".join(tried)
+        + f"\n\n디버그 스크린샷: {debug_png}"
     )
 
 
@@ -258,14 +376,20 @@ async def _cleanup_pending() -> None:
 
 
 async def fill_for_approval(
-    text: str,
+    text: "str | list[str]",
     image_path: "Path | None" = None,
     headless: bool = True,
+    image_index: int = -1,
 ) -> Path:
     """headless 브라우저를 열고 작성창을 채운 뒤 스크린샷 경로를 반환.
 
+    text가 list[str]이면 첫 항목 = 본문, 나머지 = 'Add to thread' 이어쓰기.
+
     브라우저/페이지는 모듈 레벨 _pending 에 유지되어 publish_pending / cancel_pending 에서 재사용.
     """
+    posts = [text] if isinstance(text, str) else list(text)
+    if not posts:
+        raise ValueError("text가 비어있음")
     if pending_active():
         raise RuntimeError("이전 대기 중인 작성이 있습니다. 먼저 confirm/cancel 하세요.")
 
@@ -318,17 +442,14 @@ async def fill_for_approval(
                 continue
 
         await _open_composer(page)
-        await _fill_text(page, text)
-
-        if image_path is not None:
-            await _attach_image(page, image_path)
+        await _fill_chain(page, posts, image_path=image_path, image_index=image_index)
 
         # 렌더 안정화 대기 후 미리보기 스크린샷
         await page.wait_for_timeout(1500)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         preview_png = DEBUG_DIR / f"{ts}_preview.png"
         try:
-            await page.screenshot(path=str(preview_png), full_page=False)
+            await page.screenshot(path=str(preview_png), full_page=True)
         except Exception as e:
             print(f"[fill_for_approval] 스크린샷 실패: {e}")
 
@@ -338,7 +459,8 @@ async def fill_for_approval(
         _pending["context"] = context
         _pending["page"] = page
         _pending["preview_png"] = preview_png
-        _pending["body"] = text  # 게시될 본문 저장
+        # 게시될 본문 저장 (리스트는 +++ 로 join 해서 보존)
+        _pending["body"] = "\n+++\n".join(posts)
 
         return preview_png
     except Exception:
@@ -356,8 +478,23 @@ async def publish_pending() -> None:
     if page is None:
         raise RuntimeError("대기 중인 작성이 없습니다.")
     try:
+        # 게시 직전 상태 스냅샷 (디버그)
+        try:
+            await _save_debug(page, "before_publish")
+        except Exception:
+            pass
         await _click_publish(page)
+        # 게시 직후 짧은 대기 후 다시 스냅샷
+        await page.wait_for_timeout(2000)
+        try:
+            await _save_debug(page, "after_publish_2s")
+        except Exception:
+            pass
         await _wait_publish_done(page, timeout_sec=20)
+        try:
+            await _save_debug(page, "after_publish_done")
+        except Exception:
+            pass
     finally:
         await _cleanup_pending()
 
@@ -370,21 +507,25 @@ async def cancel_pending() -> None:
 
 
 async def post_text(
-    text: str,
+    text: "str | list[str]",
     headless: bool = False,
     on_filled=None,
     image_path: "Path | None" = None,
+    image_index: int = -1,
 ) -> str:
     """Threads 작성창을 열고 텍스트를 채운 뒤 (옵션으로 이미지 첨부) 사용자의 게시를 기다린다.
 
     Args:
-        text: 작성창에 입력할 본문
+        text: 작성창에 입력할 본문 (str이면 단일, list면 본문+이어쓰기 시퀀스)
         headless: 헤드리스 모드 여부
         on_filled: 작성창 채움 완료 시 호출할 async 콜백 (예: 텔레그램 알림)
-        image_path: 첨부할 이미지 경로 (옵션)
+        image_path: 첨부할 이미지 경로 (옵션, 첫 포스트에만 첨부)
 
     Returns: "filled" (채움 성공 후 정상 종료)
     """
+    posts = [text] if isinstance(text, str) else list(text)
+    if not posts:
+        raise ValueError("text가 비어있음")
     if not STATE_FILE.exists():
         raise FileNotFoundError(
             f"세션 파일 없음: {STATE_FILE}\n"
@@ -435,11 +576,12 @@ async def post_text(
             )
 
         await _open_composer(page)
-        await _fill_text(page, text)
+        await _fill_chain(page, posts, image_path=image_path, image_index=image_index)
 
         if image_path is not None:
-            await _attach_image(page, image_path)
             print(f"🖼️  이미지 첨부 완료: {image_path.name}")
+        if len(posts) > 1:
+            print(f"🧵  이어쓰기 {len(posts) - 1}개 추가 완료")
 
         print("✅ 작성창에 본문 채움. 브라우저에서 '게시' 버튼을 직접 눌러주세요.")
         print(f"   (창은 최대 {KEEP_OPEN_SECONDS // 60}분 후 자동 종료)")
@@ -466,8 +608,11 @@ async def post_text(
 
 
 async def _cli() -> None:
-    text = sys.argv[1] if len(sys.argv) > 1 else "테스트 본문"
-    await post_text(text, headless=False)
+    raw = sys.argv[1] if len(sys.argv) > 1 else "테스트 본문"
+    # +++ 단독 라인을 구분자로 분리 (CLI에서도 멀티 포스트 테스트 가능)
+    parts = re.split(r"^\s*\+\+\+\s*$", raw, flags=re.MULTILINE)
+    posts = [p.strip() for p in parts if p.strip()]
+    await post_text(posts if len(posts) > 1 else posts[0], headless=False)
 
 
 if __name__ == "__main__":
