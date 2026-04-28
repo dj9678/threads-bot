@@ -65,6 +65,38 @@ def _save_last_output(text: str, kind: str = "output") -> None:
     except Exception:
         pass
 
+
+def _save_last_posted(body: str, direction: str = "") -> None:
+    """게시 완료된 내용 저장 — 다음 초안 생성 시 연속성 참조용."""
+    try:
+        ts = datetime.now().isoformat(timespec="seconds")
+        content = f"[{ts}]\n[direction] {direction}\n[body]\n{body}\n"
+        (LOGS_DIR / "last_posted.txt").write_text(content, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_last_posted() -> tuple[str, str]:
+    """직전 게시글 내용 및 방향 로드. (body, direction) 반환."""
+    path = LOGS_DIR / "last_posted.txt"
+    if not path.exists():
+        return "", ""
+    try:
+        content = path.read_text(encoding="utf-8")
+        direction = ""
+        body = ""
+        # [direction] 라인 파싱
+        for line in content.split("\n"):
+            if line.startswith("[direction]"):
+                direction = line.replace("[direction]", "").strip()
+                break
+        # [body] 이후 내용 파싱
+        if "[body]" in content:
+            body = content.split("[body]", 1)[1].strip()
+        return body, direction
+    except Exception:
+        return "", ""
+
 # ========== .env 로드 ==========
 if not ENV_PATH.exists():
     raise FileNotFoundError(
@@ -101,6 +133,9 @@ _last_post_sources: "dict[str, Path | None]" = {"note": None, "image": None}
 
 # 작성 모드: "remote" (headless + 2단계 승인, 기본) 또는 "local" (headful + 수동 게시)
 _state: dict = {"mode": "remote"}
+
+# 마지막 초안의 분석 방향 저장 (상승/하락/중립)
+_last_draft_direction: dict = {"value": ""}
 
 
 def _latest_recent_file(
@@ -191,21 +226,47 @@ async def _generate_draft(update: Update, img_path: Path, caption: str) -> None:
 
     claude CLI 를 default 모드(읽기 전용)로 호출 → Bash/Write/Edit 차단,
     Read 만 사용해서 이미지 + style-guide.md 읽고 본문 작성.
+
+    직전 게시글이 있으면 연속성을 고려해 작성:
+    - 직전 상승 신호 → 이번 하락이면 "지난번 말한 것과 다르게 흘러가네"
+    - 강한 방향 확신 대신 반대 상황 가능성도 언급
     """
     style_guide = BASE_DIR / "style-guide.md"
     glossary = BASE_DIR / "ict-glossary.md"
 
     notice = await update.message.reply_text("✍️ 초안 생성 중... (10~30초)")
 
+    # 직전 게시글 로드
+    prev_body, prev_direction = _load_last_posted()
+    prev_context = ""
+    if prev_body:
+        prev_context = (
+            f"\n\n[직전 게시글 정보]\n"
+            f"방향: {prev_direction or '(명시 안 됨)'}\n"
+            f"내용:\n{prev_body[:500]}{'...' if len(prev_body) > 500 else ''}\n"
+        )
+
+    # style-guide.md에 "신중한 표현 & 확신 자제", "직전 게시글과 연결" 섹션 있음
+    # 여기서는 직전 게시글 정보만 주입하고, 세부 규칙은 style-guide 참조하도록 유도
+    continuity_instruction = """
+[직전 게시글 연결 지침]
+style-guide.md의 "직전 게시글과 연결" 섹션 규칙을 따를 것.
+직전 게시글 정보가 위에 있으면 방향 변화에 맞춰 자연스럽게 연결.
+"""
+
     prompt = (
         f"이미지 (트레이딩 차트): {img_path.resolve()}\n"
         f"스타일 가이드: {style_guide.resolve()}\n"
         f"ICT 용어집: {glossary.resolve()}\n"
-        f"사용자 캡션: {caption or '(없음)'}\n\n"
+        f"사용자 캡션: {caption or '(없음)'}\n"
+        f"{prev_context}\n"
+        f"{continuity_instruction}\n\n"
         "위 차트 이미지 + style-guide.md + ict-glossary.md 를 Read 도구로 읽고, "
         "style-guide.md 의 모든 규칙 (길이·이모지·해시태그·금기 표현 등) 을 정확히 "
         "따르는 Threads 포스트 본문을 작성해줘.\n\n"
-        "출력: 본문만 ``` 코드블록으로 감싸서. 다른 설명/머리말 없이.\n"
+        "현재 차트에서 분석한 방향(상승/하락/중립)도 명시해줘. 포맷:\n"
+        "[방향] 상승 또는 하락 또는 중립\n"
+        "[본문]\n```\n실제 포스트 내용\n```\n"
     )
 
     cmd = [
@@ -245,12 +306,26 @@ async def _generate_draft(update: Update, img_path: Path, caption: str) -> None:
         )
         return
 
+    # 방향 파싱 ([방향] 상승/하락/중립)
+    direction_match = re.search(r"\[방향\]\s*(상승|하락|중립)", text)
+    if direction_match:
+        _last_draft_direction["value"] = direction_match.group(1)
+    else:
+        # 없으면 본문에서 키워드로 추론 시도
+        if "상승" in text or "롱" in text.lower() or "반등" in text:
+            _last_draft_direction["value"] = "상승"
+        elif "하락" in text or "숏" in text.lower() or "눌림" in text or "하방" in text:
+            _last_draft_direction["value"] = "하락"
+        else:
+            _last_draft_direction["value"] = "중립"
+
     # bridge 봇이 "이 초안 어때?" 분석할 때 참조
     _save_last_output(text, kind="draft")
 
     msg = (
         "✍️ 초안 (style-guide 적용):\n\n"
         f"{text}\n\n"
+        f"📊 분석 방향: {_last_draft_direction['value']}\n\n"
         "사용하려면 위 코드블록 본문을 복사해서 `/post <본문>` 으로 보내세요."
     )
     # 너무 길면 분할 송신
@@ -440,16 +515,26 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != CHAT_ID:
         return
     try:
-        from threads_poster import pending_active, publish_pending
+        from threads_poster import pending_active, publish_pending, get_pending_body
     except Exception as e:
         await update.message.reply_text(f"❌ 모듈 로드 실패: {e}")
         return
     if not pending_active():
         await update.message.reply_text("대기 중인 /post 가 없습니다.")
         return
+
+    # 게시 전에 본문 가져오기 (publish_pending 후에는 초기화됨)
+    posted_body = get_pending_body() or ""
+
     await update.message.reply_text("⏳ '게시' 클릭 중...")
     try:
         await publish_pending()
+
+        # 게시 완료된 내용 저장 (다음 초안 생성 시 연속성 참조용)
+        # 방향은 초안 저장 시 함께 저장됨
+        direction = _last_draft_direction.get("value", "")
+        _save_last_posted(posted_body, direction)
+
         await update.message.reply_text(
             "✅ 게시 완료!\n"
             "소스 파일 정리하려면 /posted"

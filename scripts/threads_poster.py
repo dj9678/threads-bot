@@ -227,11 +227,17 @@ _pending: dict = {
     "context": None,
     "page": None,
     "preview_png": None,
+    "body": None,  # 게시될 본문
 }
 
 
 def pending_active() -> bool:
     return _pending.get("browser") is not None
+
+
+def get_pending_body() -> str | None:
+    """대기 중인 게시 본문 반환."""
+    return _pending.get("body")
 
 
 async def _cleanup_pending() -> None:
@@ -332,6 +338,7 @@ async def fill_for_approval(
         _pending["context"] = context
         _pending["page"] = page
         _pending["preview_png"] = preview_png
+        _pending["body"] = text  # 게시될 본문 저장
 
         return preview_png
     except Exception:
